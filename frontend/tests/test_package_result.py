@@ -249,6 +249,36 @@ def test_quiz_accepts_correct_answer_as_letter_with_prefixed_options():
     assert metrics["Aciertos"] == "1 de 1"
 
 
+def test_quiz_muestra_la_fuente_solo_tras_confirmar_y_marca_la_pregunta_sin_cita():
+    item = FORMAT_CASES[1][1]
+    result = make_result("Quiz", item)
+    result["contenido_adaptado"]["items"].append({**item, "pregunta": "¿Cómo se controla el tráfico?"})
+    cita = "Una VCN permite aislar y controlar el tráfico de una red."
+    result["evaluacion_calidad"].update(
+        requiere_revision=True, fuentes_quiz=[{"pagina": 12, "fragmento": cita}, None],
+    )
+    app = render_result(result)
+
+    assert not app.exception
+    assert cita not in visible_text(app)
+    assert len([warning for warning in app.warning if "Pregunta pendiente" in warning.value]) == 1
+    app.radio[0].set_value("Aislar la red")
+    app.run()
+    assert cita not in visible_text(app)
+    next(button for button in app.button if button.label == "Confirmar respuesta").click()
+    app.run()
+
+    assert not app.exception
+    assert any(expander.label == "Ver fuente · Página 12" for expander in app.expander)
+    assert cita in visible_text(app)
+    assert any("¡Correcto!" in message.value for message in app.success)
+    app.radio[1].set_value("Aislar la red")
+    app.run()
+    next(button for button in app.button if button.label == "Confirmar respuesta").click()
+    app.run()
+    assert "Puntaje sobre respuestas propuestas" in {metric.label for metric in app.metric}
+
+
 def test_quiz_accepts_letter_and_answer_text_with_unprefixed_options():
     item = {
         "pregunta": "¿Cuál es la opción correcta?",

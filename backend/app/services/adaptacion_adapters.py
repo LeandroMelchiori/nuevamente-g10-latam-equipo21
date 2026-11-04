@@ -357,6 +357,7 @@ class VerificadorRealAdapter:
             vector_store=self._contexto.vector_store,
             llm_provider=self._llm,
             perfil_destinatario=payload.perfil_destinatario.value,
+            paginas_fuente=getattr(payload, "documento_paginas", None),
         )
         
 class MetadatosRealAdapter:

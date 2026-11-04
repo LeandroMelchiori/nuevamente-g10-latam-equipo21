@@ -67,6 +67,11 @@ class AfirmacionNoRespaldadaSchema(PublicSchema):
     texto: StrictStr = Field(min_length=1)
 
 
+class FuenteQuizSchema(PublicSchema):
+    pagina: StrictInt = Field(ge=1)
+    fragmento: StrictStr = Field(min_length=16, max_length=360)
+
+
 class EvaluacionCalidadSchema(PublicSchema):
     anclaje_fuente_score: StrictFloat = Field(
         ...,
@@ -82,6 +87,11 @@ class EvaluacionCalidadSchema(PublicSchema):
     umbral_fidelidad: StrictFloat | None = Field(default=None, ge=0, le=1)
     requiere_revision: StrictBool | None = None
     afirmaciones_no_respaldadas: list[AfirmacionNoRespaldadaSchema] = Field(default_factory=list)
+    fuentes_quiz: list[FuenteQuizSchema | None] | None = Field(
+        default=None,
+        exclude_if=lambda fuentes: fuentes is None,
+        description="Una entrada por pregunta, en orden. null indica falta de una cita verificada.",
+    )
 
 
 class AlmacenamientoOCISchema(PublicSchema):
@@ -134,6 +144,11 @@ class OutputSchema(PublicSchema):
                     f"contenido_adaptado.items[{indice}] no corresponde "
                     f"al formato '{formato.value}'"
                 )
+        fuentes = self.evaluacion_calidad.fuentes_quiz
+        if fuentes is not None and (
+            formato != FormatoSalida.QUIZ or len(fuentes) != len(self.contenido_adaptado.items)
+        ):
+            raise ValueError("fuentes_quiz requiere una entrada por pregunta del quiz.")
         return self
 
 

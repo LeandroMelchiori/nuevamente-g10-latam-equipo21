@@ -21,6 +21,7 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.core.config import settings
+from app.schemas.input import DocumentoPaginaSchema
 from app.schemas.output import (
     ContenidoAdaptadoSchema,
     EvaluacionCalidadSchema,
@@ -45,6 +46,7 @@ class EstadoMultiAgente(TypedDict, total=False):
 
     documento_id: str
     documento_titulo: str
+    documento_paginas: list[DocumentoPaginaSchema] | None
     consulta_recuperacion: str
 
     perfil_destinatario: str
@@ -165,6 +167,7 @@ def crear_grafo_multiagente(
                 "perfil_destinatario"
             ],
             umbral=threshold,
+            paginas_fuente=state.get("documento_paginas"),
         )
 
         return {
