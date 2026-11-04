@@ -7,12 +7,14 @@ registro en logs; no miden qué tan bien juzga un modelo real.
 """
 
 import logging
+from dataclasses import replace
 
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import settings
-from app.schemas.content import FlashcardItem
+from app.schemas.content import FlashcardItem, QuizItem
+from app.schemas.input import DocumentoPaginaSchema
 from app.schemas.output import ContenidoAdaptadoSchema, EvaluacionCalidadSchema
 from app.services import fidelity_service
 from app.services.fidelity_service import calcular_score, evaluar_fidelidad
@@ -163,6 +165,53 @@ def test_el_score_es_la_proporcion_de_afirmaciones_respaldadas():
     )
     assert calcular_score([True, False, False]) == 0.33
     assert calcular_score([True, True]) == 1.0
+
+
+@pytest.mark.parametrize(
+    "caso, esperada",
+    [
+        ("cita real", {"pagina": 12, "fragmento": _TEXTO_1}),
+        ("texto inventado", None),
+        ("diagrama", None),
+        ("pagina incorrecta", None),
+        ("fuera del presupuesto", None),
+        ("afirmacion sin respaldo", None),
+    ],
+)
+def test_fuente_del_quiz_se_valida_con_el_fragmento_y_la_pagina(monkeypatch, caso, esperada):
+    quiz = ContenidoAdaptadoSchema(
+        titulo="Caché",
+        introduccion_contextualizada="Practiquemos los conceptos.",
+        items=[QuizItem(
+            pregunta="¿Qué hace el TTL?",
+            opciones=["Define una expiración", "Aumenta el almacenamiento"],
+            respuesta_correcta="Define una expiración",
+            justificacion=_TEXTO_1,
+        )],
+    )
+    pagina = 1 if caso == "pagina incorrecta" else 12
+    tipo = "diagram" if caso == "diagrama" else "text"
+    fragmento = replace(_EVIDENCIA[1], metadatos={"pagina": pagina, "source_type": tipo})
+    cita = "Un fragmento que no existe en el documento." if caso == "texto inventado" else _TEXTO_1
+    if caso == "fuera del presupuesto":
+        monkeypatch.setattr(fidelity_service, "MAX_TOKENS_EVIDENCIA", 35)
+    verificador = VerificadorFake({
+        **_respuesta([caso != "afirmacion sin respaldo"]),
+        "fuentes_quiz": [{"item": 1, "chunk_id": fragmento.chunk_id, "fragmento": cita}],
+    })
+
+    calidad = _evaluar(
+        verificador,
+        contenido=quiz,
+        store=VectorStoreFake([_EVIDENCIA[0], fragmento]),
+        paginas_fuente=[
+            DocumentoPaginaSchema(page_number=1, text=_TEXTO_0),
+            DocumentoPaginaSchema(page_number=12, text=_TEXTO_1),
+        ],
+    )
+
+    assert calidad.model_dump(mode="json")["fuentes_quiz"] == [esperada]
+    assert calidad.requiere_revision is (esperada is None)
 
 
 def test_sin_afirmaciones_el_score_es_cero_y_se_registra(caplog):

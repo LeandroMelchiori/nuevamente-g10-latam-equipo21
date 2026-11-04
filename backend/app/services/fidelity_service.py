@@ -34,10 +34,17 @@ from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.core.config import settings
-from app.schemas.output import AfirmacionNoRespaldadaSchema, ContenidoAdaptadoSchema, EvaluacionCalidadSchema
+from app.schemas.content import QuizItem
+from app.schemas.input import DocumentoPaginaSchema
+from app.schemas.output import (
+    AfirmacionNoRespaldadaSchema,
+    ContenidoAdaptadoSchema,
+    EvaluacionCalidadSchema,
+    FuenteQuizSchema,
+)
 from app.services.llm_provider import LLMProvider, LLMProviderError
 from app.services.quality_policy import aplicar_politica_calidad
-from app.services.retrieval_service import ensamblar_contexto, recuperar_contexto
+from app.services.retrieval_service import ensamblar_contexto, fragmentos_que_caben, recuperar_contexto
 from app.services.vector_store import FragmentoRecuperado, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -46,6 +53,16 @@ FRAGMENTOS_POR_UNIDAD = 3
 MAX_TOKENS_EVIDENCIA = 8000
 _MAX_CARACTERES_CONSULTA = 2000
 _DIRECTORIO_PROMPTS = Path(__file__).parent / "prompts"
+_INSTRUCCIONES_FUENTES_QUIZ = """
+Para este quiz, evalúa la respuesta correcta y la justificación de cada pregunta.
+Las opciones incorrectas son distractores; no las evalúes como afirmaciones.
+Añade al JSON el campo "fuentes_quiz" como lista de objetos con "item" (posición
+de la pregunta a partir de 1), "chunk_id" (identificador exacto tras chunk= en
+la evidencia) y "fragmento" (cita literal de 16 a 360 caracteres de ese chunk).
+Elige como máximo una cita por pregunta. Debe respaldar la respuesta correcta y
+su justificación. Usa solo texto del PDF; omite descripciones generadas de
+diagramas y preguntas para las que no haya una cita suficiente.
+"""
 
 
 class _FidelitySchema(BaseModel):
@@ -68,6 +85,16 @@ class VerificacionFidelidadLLMSchema(_FidelitySchema):
     afirmaciones: list[AfirmacionVerificadaSchema]
     claridad_pedagogica: Literal["Alta", "Media", "Baja"]
     observaciones: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class CitaPropuestaQuizSchema(_FidelitySchema):
+    item: int
+    chunk_id: str
+    fragmento: str
+
+
+class VerificacionQuizLLMSchema(VerificacionFidelidadLLMSchema):
+    fuentes_quiz: list[CitaPropuestaQuizSchema] = Field(default_factory=list)
 
 
 @lru_cache(maxsize=1)
@@ -148,15 +175,22 @@ def _presentar_contenido(contenido_adaptado: ContenidoAdaptadoSchema) -> str:
 
 
 def _construir_mensajes(
-    *, perfil_destinatario: str | None, evidencia: str, contenido: str
+    *,
+    perfil_destinatario: str | None,
+    evidencia: str,
+    contenido: str,
+    solicitar_fuentes: bool = False,
 ) -> list[BaseMessage]:
     mensaje_humano = _cargar_plantilla_usuario().format(
         perfil_destinatario=perfil_destinatario or "no especificado",
         evidencia=evidencia or "(no se recuperaron fragmentos del documento)",
         contenido=contenido,
     )
+    instrucciones = _cargar_prompt_base()
+    if solicitar_fuentes:
+        instrucciones += "\n" + _INSTRUCCIONES_FUENTES_QUIZ
     return [
-        SystemMessage(content=_cargar_prompt_base()),
+        SystemMessage(content=instrucciones),
         HumanMessage(content=mensaje_humano),
     ]
 
@@ -168,6 +202,48 @@ def calcular_score(respaldadas: list[bool]) -> float:
     return round(sum(respaldadas) / len(respaldadas), 2)
 
 
+def _validar_fuentes_quiz(
+    verificacion: VerificacionQuizLLMSchema,
+    fragmentos: list[FragmentoRecuperado],
+    paginas: list[DocumentoPaginaSchema],
+    documento_id: str,
+    cantidad_items: int,
+) -> list[FuenteQuizSchema | None]:
+    """Resuelve citas contra el texto recuperado y el texto extraído de la página."""
+    fragmentos_por_id = {
+        fragmento.chunk_id: fragmento
+        for fragmento in fragmentos
+        if fragmento.documento_id == documento_id
+        and fragmento.metadatos.get("source_type", "text") == "text"
+    }
+    paginas_por_numero = {pagina.page_number: " ".join(pagina.text.split()) for pagina in paginas}
+    observados = {
+        afirmacion.item
+        for afirmacion in verificacion.afirmaciones
+        if not afirmacion.respaldada
+    }
+    fuentes: list[FuenteQuizSchema | None] = [None] * cantidad_items
+    for cita in verificacion.fuentes_quiz:
+        if not 1 <= cita.item <= cantidad_items or cita.item in observados:
+            continue
+        if fuentes[cita.item - 1] is not None:
+            continue
+        fragmento = fragmentos_por_id.get(cita.chunk_id)
+        if fragmento is None:
+            continue
+        pagina = fragmento.metadatos.get("pagina")
+        if type(pagina) is not int or pagina not in paginas_por_numero:
+            continue
+        texto = " ".join(cita.fragmento.split())
+        if (
+            16 <= len(texto) <= 360
+            and texto in " ".join(fragmento.texto.split())
+            and texto in paginas_por_numero[pagina]
+        ):
+            fuentes[cita.item - 1] = FuenteQuizSchema(pagina=pagina, fragmento=texto)
+    return fuentes
+
+
 def evaluar_fidelidad(
     *,
     documento_id: str,
@@ -177,6 +253,7 @@ def evaluar_fidelidad(
     perfil_destinatario: str | None = None,
     top_k: int = FRAGMENTOS_POR_UNIDAD,
     umbral: float | None = None,
+    paginas_fuente: list[DocumentoPaginaSchema] | None = None,
 ) -> EvaluacionCalidadSchema:
     """
     Evalúa qué tan respaldado está `contenido_adaptado` por el documento `documento_id`.
@@ -185,6 +262,7 @@ def evaluar_fidelidad(
     `perfil_destinatario`, si se conoce, orienta la valoración de
     la claridad. `umbral` reemplaza a `settings.FIDELITY_SCORE_THRESHOLD` para el registro en
     logs y la advertencia pública; no altera el score.
+    Para un quiz con `paginas_fuente`, también devuelve la cita validada de cada pregunta.
 
     Levanta `ValueError` si el contenido no tiene texto para verificar y `LLMProviderError` (o su
     subclase `LLMTimeoutError`) si el verificador falla o responde con una forma inesperada. Los
@@ -194,14 +272,29 @@ def evaluar_fidelidad(
     fragmentos = _reunir_evidencia(
         unidades, documento_id=documento_id, vector_store=vector_store, top_k=top_k
     )
+    paginas_quiz = (
+        paginas_fuente
+        if all(isinstance(item, QuizItem) for item in contenido_adaptado.items)
+        else None
+    )
+    if paginas_quiz:
+        fragmentos = fragmentos_que_caben(fragmentos, max_tokens=MAX_TOKENS_EVIDENCIA)
     evidencia = ensamblar_contexto(fragmentos, max_tokens=MAX_TOKENS_EVIDENCIA)
     mensajes = _construir_mensajes(
         perfil_destinatario=perfil_destinatario,
         evidencia=evidencia,
         contenido=_presentar_contenido(contenido_adaptado),
+        solicitar_fuentes=bool(paginas_quiz),
     )
 
-    verificacion = llm_provider.generate_structured(mensajes, VerificacionFidelidadLLMSchema)
+    fuentes_quiz = None
+    if paginas_quiz:
+        verificacion = llm_provider.generate_structured(mensajes, VerificacionQuizLLMSchema)
+        fuentes_quiz = _validar_fuentes_quiz(
+            verificacion, fragmentos, paginas_quiz, documento_id, len(contenido_adaptado.items)
+        )
+    else:
+        verificacion = llm_provider.generate_structured(mensajes, VerificacionFidelidadLLMSchema)
     score = calcular_score(
         [afirmacion.respaldada for afirmacion in verificacion.afirmaciones]
     )
@@ -227,5 +320,6 @@ def evaluar_fidelidad(
             for afirmacion in verificacion.afirmaciones
             if not afirmacion.respaldada
         ],
+        fuentes_quiz=fuentes_quiz,
     )
     return aplicar_politica_calidad(evaluacion, umbral=minimo)

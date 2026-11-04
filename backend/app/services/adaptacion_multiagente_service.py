@@ -17,7 +17,7 @@ from app.schemas.input import InputSchema
 from app.schemas.output import OutputSchema
 from app.services.adaptacion_adapters import (
     construir_consulta,
-    documento_id_desde_contenido,
+    documento_id_indice_desde_payload,
 )
 from app.services.adaptacion_service import AdaptacionService
 from app.services.quality_policy import (
@@ -47,8 +47,9 @@ class AdaptacionMultiAgenteService(AdaptacionService):
 
     def _estado_inicial(self, payload: InputSchema, ctx) -> dict:
         return {
-            "documento_id": documento_id_desde_contenido(payload.documento_contenido),
+            "documento_id": documento_id_indice_desde_payload(payload),
             "documento_titulo": payload.documento_titulo,
+            "documento_paginas": payload.documento_paginas,
             "consulta_recuperacion": construir_consulta(
                 payload.documento_titulo, payload.documento_contenido
             ),

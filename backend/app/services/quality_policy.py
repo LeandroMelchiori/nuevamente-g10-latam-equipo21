@@ -28,5 +28,6 @@ def aplicar_politica_calidad(
         "requiere_revision": (
             evaluacion.anclaje_fuente_score < minimo
             or bool(evaluacion.afirmaciones_no_respaldadas)
+            or None in (evaluacion.fuentes_quiz or [])
         ),
     })

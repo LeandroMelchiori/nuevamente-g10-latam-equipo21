@@ -58,7 +58,10 @@ def render_flashcards(items: list[dict]) -> None:
 
 
 def render_quiz(
-    items: list[dict], claims: list[dict] | None = None, review_all: bool = False
+    items: list[dict],
+    claims: list[dict] | None = None,
+    review_all: bool = False,
+    sources: list[dict | None] | None = None,
 ) -> None:
     quiz_signature = hashlib.sha256(
         json.dumps(items, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -79,12 +82,17 @@ def render_quiz(
             observations = [
                 claim for claim in (claims or []) if claim["item"] == number
             ]
-            needs_review = review_all or bool(observations)
+            source = sources[number - 1] if sources and number <= len(sources) else None
+            missing_source = sources is not None and source is None
+            needs_review = review_all or bool(observations) or missing_source
             if needs_review:
-                st.warning(
-                    "Pregunta pendiente de revisión: su respuesta o explicación "
-                    "puede no estar respaldada por el documento."
-                )
+                if missing_source and not observations:
+                    st.warning("Pregunta pendiente de revisión: falta una cita verificable del PDF.")
+                else:
+                    st.warning(
+                        "Pregunta pendiente de revisión: su respuesta o explicación "
+                        "puede no estar respaldada por el documento."
+                    )
                 for claim in observations:
                     st.write(f"Afirmación observada: {claim['texto']}")
             st.write(item["pregunta"])
@@ -141,6 +149,9 @@ def render_quiz(
                             f"Incorrecto. La respuesta correcta es: {correct_display}"
                         )
                 st.info(f"Justificación: {item['justificacion']}")
+                if source is not None:
+                    with st.expander(f"Ver fuente · Página {source['pagina']}"):
+                        st.text(source["fragmento"])
 
             if not is_locked and question_number in answers:
                 if st.button("Confirmar respuesta", key=confirm_key):
@@ -159,8 +170,10 @@ def render_quiz(
         )
         score = round(correct_answers / len(items) * 100)
         score_column, correct_column = st.columns(2)
-        has_review_items = review_all or any(
-            1 <= claim["item"] <= len(items) for claim in (claims or [])
+        has_review_items = (
+            review_all
+            or None in (sources or [])
+            or any(1 <= claim["item"] <= len(items) for claim in (claims or []))
         )
         score_column.metric(
             "Puntaje sobre respuestas propuestas"
@@ -270,6 +283,9 @@ def render_package_result(result: dict) -> None:
     quality = result.get("evaluacion_calidad", {})
     review = requires_review(quality)
     claims = quality.get("afirmaciones_no_respaldadas") or []
+    score = quality.get("anclaje_fuente_score")
+    threshold = quality.get("umbral_fidelidad")
+    below_threshold = score is not None and threshold is not None and score < threshold
     if review is True:
         st.warning(
             "Este contenido requiere revisión: puede incluir afirmaciones no "
@@ -302,8 +318,11 @@ def render_package_result(result: dict) -> None:
 
     renderer = RENDERERS.get(output_format)
     if output_format == "Quiz":
+        sources = quality.get("fuentes_quiz")
+        missing_sources = sources is not None and None in sources
+        review_all = review is True and not claims and (below_threshold or not missing_sources)
         render_quiz(
-            content["items"], claims, review_all=review is True and not claims
+            content["items"], claims, review_all=review_all, sources=sources
         )
     elif renderer:
         renderer(content["items"])
@@ -312,7 +331,6 @@ def render_package_result(result: dict) -> None:
 
     st.subheader("Calidad del contenido")
     score_column, clarity_column = st.columns(2)
-    score = quality.get("anclaje_fuente_score")
 
     score_column.metric(
         "Anclaje a la fuente",
@@ -323,9 +341,8 @@ def render_package_result(result: dict) -> None:
         quality.get("claridad_pedagogica", "No disponible"),
     )
 
-    threshold = quality.get("umbral_fidelidad")
     if score is not None and threshold is not None:
-        if score < threshold:
+        if below_threshold:
             st.markdown(f":orange[Por debajo del umbral de fidelidad ({threshold:.0%}).]")
         else:
             st.markdown(f":green[Alcanza el umbral de fidelidad ({threshold:.0%}).]")
