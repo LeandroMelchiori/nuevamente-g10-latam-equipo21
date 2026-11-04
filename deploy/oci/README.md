@@ -609,6 +609,56 @@ sudo env \
 Después de la actualización deben repetirse el health check público y una prueba
 funcional de generación contra el backend real.
 
+## Despliegue continuo del fork personal
+
+El workflow [CI y publicación OCI](../../.github/workflows/oci.yml) ejecuta
+las suites de backend, frontend y acceso en los PR hacia `main` y después de
+cada integración. Cuando pasan en `main` del fork de Leandro, publica las tres
+imágenes ARM64 en GHCR con el SHA completo del commit. Las pruebas usan Gemini
+simulado y no requieren credenciales de OCI.
+
+La VM consulta `main` por HTTPS y espera a que estén disponibles las tres
+imágenes de la misma revisión. Las fija por digest, aplica el Compose y verifica
+que los servicios estén sanos y que el dominio redirija al acceso protegido.
+Si falla, restaura el release anterior. La configuración de la demo sigue en
+`/etc/docker-platform/apps/nuevamente` y el volumen de ChromaDB conserva su nombre.
+
+### Activación inicial en la VM
+
+1. Confirmar que el workflow del fork publicó las tres imágenes. Para paquetes
+   privados, iniciar sesión en GHCR en la VM como el usuario que ejecutará
+   Docker, con la configuración dedicada de NuevaMente y una credencial de
+   solo lectura de paquetes. GitHub Actions publica con su propio token.
+
+   ```bash
+   sudo install -d -m 0700 /etc/docker-platform/apps/nuevamente/docker
+   sudo docker --config /etc/docker-platform/apps/nuevamente/docker login ghcr.io --username LeandroMelchiori
+   ```
+2. Desde el checkout del fork en la VM, instalar el Compose revisado y las
+   unidades. El servicio usa el Compose instalado. Los cambios futuros de
+   configuración de infraestructura requieren actualizar ese archivo en la VM.
+
+   ```bash
+   sudo install -m 0640 deploy/oci/compose.backend.yml deploy/oci/sync-fork.sh /etc/docker-platform/apps/nuevamente/
+   sudo install -m 0644 deploy/oci/nuevamente-fork.{service,timer} /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl start nuevamente-fork.service
+   sudo journalctl -u nuevamente-fork.service -n 30 --no-pager
+   ```
+
+3. Comprobar que el registro muestra el SHA esperado y que la generación y
+   persistencia funcionan desde la demo. Activar entonces la consulta cada
+   cinco minutos con `sudo systemctl enable --now nuevamente-fork.timer`.
+
+El servicio guarda las referencias de las imágenes en `active.env` y
+`previous.env` dentro del directorio de configuración. Conservá las imágenes
+de ambos releases para poder revertir. Si el despliegue de un SHA falla después
+de aplicar Compose y la restauración pasa, ese SHA queda registrado en
+`rejected`. Tras corregir la causa, publicá otro commit o eliminá el marcador
+antes de reintentar el mismo. Para mantenimiento manual, detené el timer y
+esperá a que termine cualquier ejecución del servicio antes de cambiar el
+Compose o la versión activa.
+
 ## Acceso administrativo
 
 SSH permanece restringido a una única dirección IPv4 `/32`. Si cambia la IP del

@@ -1,0 +1,11 @@
+[Unit]
+Description=Actualizar la demo NuevaMente desde el fork personal
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DOCKER_CONFIG=/etc/docker-platform/apps/nuevamente/docker
+ExecStart=/usr/bin/bash /etc/docker-platform/apps/nuevamente/sync-fork.sh
+TimeoutStartSec=15min
